@@ -2,6 +2,9 @@ import cv2
 import torch
 import time
 import math
+import threading
+from pydub import AudioSegment
+import simpleaudio as sa
 
 def compute_iou(box1, box2):
     x_left = max(box1[0], box2[0])
@@ -17,6 +20,11 @@ def compute_iou(box1, box2):
     return iou
 
 center_point = None
+latest_distance = None
+max_distance = None
+audio_thread_running = False
+audio_thread = None
+hurricane_sound = None
 
 def mouse_callback(event, x, y, flags, param):
     global center_point
@@ -79,6 +87,44 @@ while center_point is None:
 
 cv2.destroyWindow("Set Center")
 
+ret, frame = cap.read()
+if not ret:
+    print("Error: Could not capture frame for audio configuration.")
+    exit()
+height, width = frame.shape[:2]
+max_distance = math.sqrt(width**2 + height**2) / 2.0
+latest_distance = max_distance
+
+try:
+    hurricane_sound = AudioSegment.from_mp3("hurricane_sound.mp3")
+except Exception as e:
+    print(f"Error loading hurricane_sound.mp3: {e}")
+    exit()
+
+def audio_playback_loop():
+    global latest_distance, audio_thread_running, hurricane_sound, max_distance
+    chunk_duration = 500
+    pointer = 0
+    while audio_thread_running:
+        current_distance = latest_distance if latest_distance is not None else max_distance
+        gain_db = -50 * (current_distance / max_distance)
+        if pointer + chunk_duration > len(hurricane_sound):
+            chunk = hurricane_sound[pointer:] + hurricane_sound[:(pointer+chunk_duration - len(hurricane_sound))]
+            pointer = (pointer + chunk_duration) % len(hurricane_sound)
+        else:
+            chunk = hurricane_sound[pointer:pointer+chunk_duration]
+            pointer += chunk_duration
+        chunk_adjusted = chunk.apply_gain(gain_db)
+        play_obj = sa.play_buffer(chunk_adjusted.raw_data,
+                                    num_channels=chunk_adjusted.channels,
+                                    bytes_per_sample=chunk_adjusted.sample_width,
+                                    sample_rate=chunk_adjusted.frame_rate)
+        play_obj.wait_done()
+
+audio_thread_running = True
+audio_thread = threading.Thread(target=audio_playback_loop, daemon=True)
+audio_thread.start()
+
 print("Entering tracking mode. Press 'q' to exit.")
 prev_time = time.time()
 frame_count = 0
@@ -108,11 +154,14 @@ while True:
         obj_center = ((new_object_box[0] + new_object_box[2]) / 2,
                       (new_object_box[1] + new_object_box[3]) / 2)
         distance = math.sqrt((obj_center[0] - center_point[0])**2 + (obj_center[1] - center_point[1])**2)
+        latest_distance = distance
         print(f"Distance from center: {distance:.2f} pixels")
         cv2.circle(frame, (int(obj_center[0]), int(obj_center[1])), 5, (0, 0, 255), -1)
         cv2.circle(frame, (int(center_point[0]), int(center_point[1])), 5, (255, 0, 0), -1)
         cv2.line(frame, (int(obj_center[0]), int(obj_center[1])), (int(center_point[0]), int(center_point[1])), (0, 255, 255), 2)
-    
+    else:
+        latest_distance = max_distance
+
     cv2.imshow("Tracking", frame)
     
     frame_count += 1
@@ -124,6 +173,10 @@ while True:
     
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
+
+audio_thread_running = False
+if audio_thread is not None:
+    audio_thread.join()
 
 cap.release()
 cv2.destroyAllWindows()
