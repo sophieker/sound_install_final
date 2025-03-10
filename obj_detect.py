@@ -25,6 +25,8 @@ max_distance = None
 audio_thread_running = False
 audio_thread = None
 hurricane_sound = None
+target_volume = None
+current_volume = None
 
 def mouse_callback(event, x, y, flags, param):
     global center_point
@@ -102,24 +104,37 @@ except Exception as e:
     exit()
 
 def audio_playback_loop():
-    global latest_distance, audio_thread_running, hurricane_sound, max_distance
-    chunk_duration = 500
+    global latest_distance, audio_thread_running, hurricane_sound, max_distance, target_volume, current_volume
+    
+    chunk_duration = 200  
     pointer = 0
+    
+    target_volume = -50.0
+    current_volume = -50.0
+    
+    play_queue = []
+    
     while audio_thread_running:
         current_distance = latest_distance if latest_distance is not None else max_distance
-        gain_db = -50 * (current_distance / max_distance)
+        target_volume = -50 * (current_distance / max_distance)
+        
+        current_volume = current_volume + (target_volume - current_volume) * 0.2
+        
         if pointer + chunk_duration > len(hurricane_sound):
             chunk = hurricane_sound[pointer:] + hurricane_sound[:(pointer+chunk_duration - len(hurricane_sound))]
             pointer = (pointer + chunk_duration) % len(hurricane_sound)
         else:
             chunk = hurricane_sound[pointer:pointer+chunk_duration]
             pointer += chunk_duration
-        chunk_adjusted = chunk.apply_gain(gain_db)
+        
+        chunk_adjusted = chunk.apply_gain(current_volume)
+        
         play_obj = sa.play_buffer(chunk_adjusted.raw_data,
-                                    num_channels=chunk_adjusted.channels,
-                                    bytes_per_sample=chunk_adjusted.sample_width,
-                                    sample_rate=chunk_adjusted.frame_rate)
-        play_obj.wait_done()
+                                  num_channels=chunk_adjusted.channels,
+                                  bytes_per_sample=chunk_adjusted.sample_width,
+                                  sample_rate=chunk_adjusted.frame_rate)
+        
+        time.sleep(chunk_duration/1000 * 0.9)
 
 audio_thread_running = True
 audio_thread = threading.Thread(target=audio_playback_loop, daemon=True)
@@ -160,7 +175,10 @@ while True:
         cv2.circle(frame, (int(center_point[0]), int(center_point[1])), 5, (255, 0, 0), -1)
         cv2.line(frame, (int(obj_center[0]), int(obj_center[1])), (int(center_point[0]), int(center_point[1])), (0, 255, 255), 2)
     else:
-        latest_distance = max_distance
+        if latest_distance is not None:
+            latest_distance = min(latest_distance + max_distance * 0.05, max_distance)
+        else:
+            latest_distance = max_distance
 
     cv2.imshow("Tracking", frame)
     
