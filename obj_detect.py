@@ -50,6 +50,9 @@ class AudioPlayer:
         self.running = False
         self.CHUNK_SIZE = 2048
         self.sample_rate = sample_rate
+        # Add muted flag and store last volume before muting
+        self.muted = False
+        self.last_unmuted_volume = -50.0
 
     def audio_callback(self, outdata, frames, time_info, status):
         if status:
@@ -92,7 +95,29 @@ class AudioPlayer:
     def update_volume(self, distance_ratio):
         # Update volume: 0 dB (no attenuation) when object is centered,
         # down to -50 dB when object is far (distance_ratio=1)
-        self.volume.update(-50 * distance_ratio)
+        target_volume = -50 * distance_ratio
+        
+        # Always calculate what the volume would have been
+        self.last_unmuted_volume = target_volume
+        
+        # Only update actual volume if not muted
+        if not self.muted:
+            self.volume.update(target_volume)
+    
+    def mute(self):
+        if not self.muted:
+            self.muted = True
+            self.volume.update(-100)  # Effectively silent
+    
+    def unmute(self):
+        if self.muted:
+            self.muted = False
+            self.volume.update(self.last_unmuted_volume)
+    
+    def restore_on_exit(self):
+        self.unmute()
+        # Let the volume update for a moment
+        time.sleep(0.1)
 
 # --- Main script combining calibration & tracking with new audio ---
 def main():
@@ -177,6 +202,9 @@ def main():
 
     audio_player.start()
 
+    # Define proximity threshold for muting (as a percentage of max_distance)
+    proximity_threshold = 0.1  # 10% of max distance
+
     print("Entering tracking mode. Press 'q' to exit.")
     while True:
         ret, frame = cap.read()
@@ -206,6 +234,21 @@ def main():
                           (new_object_box[1] + new_object_box[3]) / 2)
             distance = math.sqrt((obj_center[0] - center_point[0])**2 + (obj_center[1] - center_point[1])**2)
             latest_distance = distance
+            distance_ratio = min(distance / max_distance, 1.0)
+            
+            # Check if object is very close to center point
+            if distance_ratio < proximity_threshold:
+                # Make it completely silent when in proximity
+                audio_player.volume.update(-100)  # Complete silence
+                audio_player.muted = True
+                cv2.putText(frame, "SILENT", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            else:
+                # If we were muted and now we're outside the threshold
+                if audio_player.muted:
+                    audio_player.muted = False
+                # Update to the appropriate volume for current distance
+                audio_player.volume.update(-50 * distance_ratio)
+            
             print(f"Distance from center: {distance:.2f} pixels")
             cv2.circle(frame, (int(obj_center[0]), int(obj_center[1])), 5, (0, 0, 255), -1)
             cv2.circle(frame, (int(center_point[0]), int(center_point[1])), 5, (255, 0, 0), -1)
@@ -213,15 +256,26 @@ def main():
         else:
             # If no new object is detected, simulate the object moving away by increasing the distance gradually
             latest_distance = min(latest_distance + max_distance * 0.05, max_distance)
-        
-        # Update the audio volume based on the current distance ratio
-        distance_ratio = min(latest_distance / max_distance, 1.0)
-        audio_player.update_volume(distance_ratio)
+            
+            # If we were muted and now no object is detected
+            if audio_player.muted:
+                audio_player.muted = False
+            
+            # Set appropriate volume for current distance
+            distance_ratio = min(latest_distance / max_distance, 1.0)
+            audio_player.volume.update(-50 * distance_ratio)
         
         cv2.imshow("Tracking", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
+    # Restore audio before exiting - unmute and set to appropriate volume
+    if audio_player.muted:
+        audio_player.muted = False
+        distance_ratio = min(latest_distance / max_distance, 1.0)
+        audio_player.volume.update(-50 * distance_ratio)
+        time.sleep(0.1)  # Let the volume update
+    
     audio_player.stop()
     cap.release()
     cv2.destroyAllWindows()
